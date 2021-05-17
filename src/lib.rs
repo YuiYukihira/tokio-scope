@@ -1,6 +1,6 @@
 use std::{fmt::Debug, future::Future, marker::PhantomData, mem::ManuallyDrop, pin::Pin, task::{Context, Poll}};
 
-use tokio::{runtime::Runtime, sync::mpsc};
+use tokio::{runtime::Runtime, sync::mpsc, task::{JoinError, JoinHandle}};
 
 /// Borrows a tokio Runtime to construct a `ScopeBuilder` which can be used
 /// to create a scope.
@@ -97,16 +97,17 @@ impl<'a> Scope<'a> {
         }
     }
 
-    fn scoped_future<'s, F>(&'s self, f: F) -> ScopedFuture
+    fn scoped_future<'s, F, R>(&'s self, f: F) -> ScopedFuture<R>
     where
-    F: Future<Output = ()> + Send + 'a,
+    F: Future<Output = R> + Send + 'a,
+    R: Send + 'a,
     'a: 's,
     {
-        let boxed: Pin<Box<dyn Future<Output = ()> + Send + 'a>> = Box::pin(f);
+        let boxed: Pin<Box<dyn Future<Output = R> + Send + 'a>> = Box::pin(f);
         // This transmute sohuld be safe, as we use the `ScopedFuture` abstraction to
         // prevent the scope form exiting unitl every spowned `ScopedFuture` object is
         // dropped, signifying that they have completed their execution.
-        let boxed: Pin<Box<dyn Future<Output = ()> + Send + 'static>> = unsafe {
+        let boxed: Pin<Box<dyn Future<Output = R> + Send + 'static>> = unsafe {
             std::mem::transmute(boxed)
         };
         ScopedFuture {
@@ -118,14 +119,20 @@ impl<'a> Scope<'a> {
     /// Spawn the received future on the [`ScopedRuntime`] which was used te create `self`.
     ///
     /// [`ScopedRuntime`]: /tokio-scope/struct.ScopedRuntime.html
-    pub fn spawn<'s, F>(&'s self, future: F) -> &Self
+    pub fn spawn<'s, F, R>(&'s self, future: F) -> ScopeHandle<R>
     where
-    F: Future<Output = ()> + Send + 'a,
+    F: Future<Output = R> + Send + 'a,
+    R: Send + 'static,
     'a: 's,
     {
         let scoped_f = self.scoped_future(future);
-        self.rt.spawn(scoped_f);
-        self
+        let handle = Box::pin(self.rt.spawn(scoped_f));
+        let scoped_handle = ScopeHandle {
+            handle,
+            _marker: (*self.send).clone()
+        };
+        //self
+        scoped_handle
     }
 
     /*
@@ -178,15 +185,33 @@ impl<'a> Drop for Scope<'a> {
     }
 }
 
-pub struct ScopedFuture {
-    f: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+pub struct ScopedFuture<R> {
+    f: Pin<Box<dyn Future<Output = R> + Send + 'static>>,
     _marker: mpsc::Sender<()>,
 }
 
-impl Future for ScopedFuture {
-    type Output = ();
+impl<R> Future for ScopedFuture<R> {
+    type Output = R;
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.f.as_mut().poll(cx)
+    }
+}
+
+pub struct ScopeHandle<R> {
+    handle: Pin<Box<JoinHandle<R>>>,
+    _marker: mpsc::Sender<()>,
+}
+
+impl<R> Future for ScopeHandle<R> {
+    type Output = Result<R, JoinError>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.handle.as_mut().poll(cx)
+    }
+}
+
+impl<R> ScopeHandle<R> {
+    pub fn abort(&self) {
+        self.handle.abort()
     }
 }
 
@@ -320,5 +345,21 @@ mod testing {
             }));
         });
         assert_eq!(values, &[1, 2, 3, 4, 100]);
+    }
+
+    #[test]
+    fn scope_handle_test() {
+        let scoped = make_runtime();
+        let mut v = String::from("Hello");
+        scoped.scope(|scope| {
+            let h = scope.spawn(async {
+                v.push('!');
+            });
+            scope.spawn(async {
+                h.await;
+                v.push('?');
+            });
+        });
+        assert_eq!(v.as_str(), "Hello!?");
     }
 }
