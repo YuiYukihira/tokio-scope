@@ -38,10 +38,10 @@ impl ScopedRuntime {
     /// Creates a scope bound by the lifetime of `self` that can be used to spawn scoped futures.
     pub fn scope<'a, F, R>(&'a self, f: F) -> R
     where
-    F: FnOnce(&mut Scope<'a>) -> R,
+    F: FnOnce(&Scope<'a>) -> R,
     {
-        let mut scope = Scope::new(&self.0);
-        f(&mut scope)
+        let scope = Scope::new(&self.0);
+        f(&scope)
     }
 
     /// Consumes the `ScopedRuntime` and returns the inner [`Runtime`] variable.
@@ -67,10 +67,10 @@ impl<'a> ScopeBuilder<'a> {
 
     pub fn scope<F, R>(&self, f: F) -> R
     where
-    F: FnOnce(&mut Scope<'a>) -> R,
+    F: FnOnce(&Scope<'a>) -> R,
     {
-        let mut scope = Scope::new(self.0);
-        f(&mut scope)
+        let scope = Scope::new(self.0);
+        f(&scope)
     }
 }
 
@@ -161,11 +161,11 @@ impl<'a> Scope<'a> {
     /// Creates an `inner` scope which can access variables created within the outer scope.
     pub fn scope<'inner, F, R>(&'inner self, f: F) -> R
     where
-    F: FnOnce(&mut Scope<'inner>) -> R,
+    F: FnOnce(&Scope<'inner>) -> R,
     'a: 'inner,
     {
-        let mut scope = Scope::new(self.rt);
-        f(&mut scope)
+        let scope = Scope::new(self.rt);
+        f(&scope)
     }
 
     /// Get a reference to the underlying `Runtime` instance.
